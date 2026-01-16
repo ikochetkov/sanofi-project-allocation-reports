@@ -1,8 +1,6 @@
 const express = require('express');
 const ExcelJS = require('exceljs');
 const puppeteer = require('puppeteer');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(express.json({ 
@@ -476,11 +474,19 @@ function processPayloadForPDF(payload) {
     ? payload.sheets
     : [{ sheetName: 'Resource Allocation', payload: payload }];
 
+  // Count projects (excluding Summary)
+  const projectCount = rawSheets.filter(s => s.sheetName !== 'Summary').length;
+
   rawSheets.forEach((sheetEntry) => {
-    const sheetName = sheetEntry.sheetName || 'Sheet';
+    let sheetName = sheetEntry.sheetName || 'Sheet';
     const sheetPayload = sheetEntry.payload || payload;
     const rows = sheetPayload.rows || [];
     const months = sheetPayload.meta?.months || [];
+
+    // Add project count to Summary title
+    if (sheetName === 'Summary') {
+      sheetName = `Summary - ${projectCount} projects`;
+    }
 
     // Calculate grand totals from role-level rows
     let grandTotalAllocated = 0;
@@ -547,78 +553,141 @@ function processPayloadForPDF(payload) {
 }
 
 /**
- * Simple template engine for PDF HTML
+ * Render HTML from data (replaces template engine)
  */
-function renderTemplate(template, data) {
-  let html = template;
+function renderPDFHtml(data) {
+  const formatNum = (v) => (v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const formatPct = (v) => formatNum(v) + '%';
 
-  // Replace {{generatedOn}}
-  html = html.replace(/\{\{generatedOn\}\}/g, data.generatedOn);
-
-  // Replace {{{chartsDataJson}}} (triple braces = no escaping)
-  html = html.replace(/\{\{\{chartsDataJson\}\}\}/g, JSON.stringify(data.chartsData));
-
-  // Process {{#each sheets}} ... {{/each}}
-  const sheetsMatch = html.match(/\{\{#each sheets\}\}([\s\S]*?)\{\{\/each\}\}/);
-  if (sheetsMatch) {
-    const sheetTemplate = sheetsMatch[1];
-    let sheetsHtml = '';
-
-    data.sheets.forEach((sheet, sheetIndex) => {
-      let sheetHtml = sheetTemplate;
-      
-      // Replace sheet-level variables
-      sheetHtml = sheetHtml.replace(/\{\{sheetName\}\}/g, sheet.sheetName);
-      sheetHtml = sheetHtml.replace(/\{\{@index\}\}/g, sheetIndex);
-
-      // Process {{#each rows}} ... {{/each}}
-      const rowsMatch = sheetHtml.match(/\{\{#each rows\}\}([\s\S]*?)\{\{\/each\}\}/);
-      if (rowsMatch) {
-        const rowTemplate = rowsMatch[1];
-        let rowsHtml = '';
-
-        sheet.rows.forEach((row) => {
-          let rowHtml = rowTemplate;
-          
-          // Handle {{#if isRole}}...{{else}}...{{/if}}
-          const ifMatch = rowHtml.match(/\{\{#if isRole\}\}(.*?)\{\{else\}\}(.*?)\{\{\/if\}\}/);
-          if (ifMatch) {
-            rowHtml = rowHtml.replace(ifMatch[0], row.isRole ? ifMatch[1] : ifMatch[2]);
-          }
-
-          rowHtml = rowHtml.replace(/\{\{label\}\}/g, row.label);
-          rowHtml = rowHtml.replace(/\{\{formatNumber plannedTotal\}\}/g, formatNumber(row.plannedTotal));
-          rowHtml = rowHtml.replace(/\{\{formatNumber actualTotal\}\}/g, formatNumber(row.actualTotal));
-          rowHtml = rowHtml.replace(/\{\{formatNumber variance\}\}/g, formatNumber(row.variance));
-          rowHtml = rowHtml.replace(/\{\{formatPercent effortPct\}\}/g, formatPercent(row.effortPct));
-
-          rowsHtml += rowHtml;
-        });
-
-        sheetHtml = sheetHtml.replace(rowsMatch[0], rowsHtml);
-      }
-
-      // Replace grand total values
-      sheetHtml = sheetHtml.replace(/\{\{formatNumber grandTotal\.allocated\}\}/g, formatNumber(sheet.grandTotal.allocated));
-      sheetHtml = sheetHtml.replace(/\{\{formatNumber grandTotal\.actual\}\}/g, formatNumber(sheet.grandTotal.actual));
-      sheetHtml = sheetHtml.replace(/\{\{formatNumber grandTotal\.variance\}\}/g, formatNumber(sheet.grandTotal.variance));
-      sheetHtml = sheetHtml.replace(/\{\{formatPercent grandTotal\.effortPct\}\}/g, formatPercent(sheet.grandTotal.effortPct));
-
-      sheetsHtml += sheetHtml;
+  let sheetsHtml = '';
+  
+  data.sheets.forEach((sheet, idx) => {
+    // Build rows HTML
+    let rowsHtml = '';
+    sheet.rows.forEach(row => {
+      const rowClass = row.isRole ? 'role-row' : 'user-row';
+      rowsHtml += `
+        <tr class="${rowClass}">
+          <td>${row.label}</td>
+          <td>${formatNum(row.plannedTotal)}</td>
+          <td>${formatNum(row.actualTotal)}</td>
+          <td>${formatNum(row.variance)}</td>
+          <td>${formatPct(row.effortPct)}</td>
+        </tr>`;
     });
 
-    html = html.replace(sheetsMatch[0], sheetsHtml);
-  }
+    sheetsHtml += `
+    <div class="sheet-section">
+      <div class="sheet-title">${sheet.sheetName}</div>
+      
+      <div class="chart-container">
+        <canvas id="chart-${idx}"></canvas>
+      </div>
+      
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 35%">Role / User</th>
+            <th style="width: 16%">Allocated Hours</th>
+            <th style="width: 16%">Actual Hours</th>
+            <th style="width: 16%">Variance</th>
+            <th style="width: 17%">Effort Utilized</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+          <tr class="grand-total">
+            <td>GRAND TOTAL</td>
+            <td>${formatNum(sheet.grandTotal.allocated)}</td>
+            <td>${formatNum(sheet.grandTotal.actual)}</td>
+            <td>${formatNum(sheet.grandTotal.variance)}</td>
+            <td>${formatPct(sheet.grandTotal.effortPct)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>`;
+  });
 
-  return html;
-}
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Resource Allocation Report</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; padding: 30px; color: #333; background: #fff; }
+    .header { text-align: center; margin-bottom: 30px; padding-bottom: 20px; border-bottom: 2px solid #333; }
+    .header h1 { font-size: 24px; color: #333; margin-bottom: 5px; }
+    .header .subtitle { font-size: 14px; color: #666; }
+    .sheet-section { margin-bottom: 40px; page-break-before: always; }
+    .sheet-section:first-of-type { page-break-before: avoid; }
+    .sheet-title { font-size: 18px; font-weight: bold; color: #333; margin-bottom: 20px; padding: 10px; background: #f5f5f5; border-left: 4px solid #333; word-wrap: break-word; }
+    .chart-container { width: 100%; height: 300px; margin-bottom: 30px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 11px; }
+    th { background: #333; color: #fff; font-weight: bold; padding: 10px 8px; text-align: center; border: 1px solid #333; }
+    th:first-child { text-align: left; }
+    td { padding: 8px; border: 1px solid #ccc; text-align: center; }
+    td:first-child { text-align: left; }
+    tr.role-row { background: #e0e0e0; font-weight: bold; }
+    tr.user-row td:first-child { padding-left: 20px; }
+    tr.grand-total { background: #333; color: #fff; font-weight: bold; }
+    tr.grand-total td { border-color: #333; }
+    .footer { margin-top: 30px; padding-top: 15px; border-top: 1px solid #ccc; font-size: 10px; color: #999; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Resource Allocation Report</h1>
+    <div class="subtitle">Generated on ${data.generatedOn}</div>
+  </div>
 
-function formatNumber(value) {
-  return (value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
+  ${sheetsHtml}
 
-function formatPercent(value) {
-  return (value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%';
+  <div class="footer">
+    Resource Management Workbench Report • Confidential
+  </div>
+
+  <script>
+    Chart.register(ChartDataLabels);
+    const chartsData = ${JSON.stringify(data.chartsData)};
+    
+    chartsData.forEach((chartData, index) => {
+      const ctx = document.getElementById('chart-' + index);
+      if (!ctx) return;
+
+      new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: chartData.labels,
+          datasets: [
+            { label: 'Allocated', data: chartData.allocated, backgroundColor: 'rgba(51, 51, 51, 0.85)', borderColor: '#333', borderWidth: 1 },
+            { label: 'Actual', data: chartData.actual, backgroundColor: 'rgba(76, 175, 80, 0.85)', borderColor: '#4CAF50', borderWidth: 1 }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { position: 'top', labels: { font: { size: 11 } } },
+            title: { display: true, text: 'Hours Planned vs Consumed by Period', font: { size: 14, weight: 'bold' } },
+            datalabels: {
+              anchor: 'end', align: 'top', offset: 2,
+              font: { size: 10, weight: 'bold' }, color: '#333',
+              formatter: (value) => value === 0 ? '' : value.toLocaleString('en-US', { maximumFractionDigits: 0 })
+            }
+          },
+          scales: {
+            x: { title: { display: true, text: 'Allocated/Actual Utilization', font: { size: 12, weight: 'bold' } } },
+            y: { beginAtZero: true, title: { display: true, text: 'Hours', font: { size: 12, weight: 'bold' } }, ticks: { callback: function(v) { return v.toLocaleString(); } } }
+          }
+        }
+      });
+    });
+  </script>
+</body>
+</html>`;
 }
 
 /**
@@ -627,15 +696,11 @@ function formatPercent(value) {
  * @returns {Buffer} PDF buffer
  */
 async function generatePDF(payload) {
-  // Load template
-  const templatePath = path.join(__dirname, 'templates', 'pdf-report.html');
-  const template = fs.readFileSync(templatePath, 'utf-8');
-
   // Process payload
   const data = processPayloadForPDF(payload);
 
-  // Render template
-  const html = renderTemplate(template, data);
+  // Render HTML directly (no template file needed now)
+  const html = renderPDFHtml(data);
 
   // Launch Puppeteer and generate PDF
   const browser = await puppeteer.launch({
