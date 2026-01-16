@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Resource Allocation Report</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      padding: 30px;
+      color: #333;
+      background: #fff;
+    }
+    
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+      padding-bottom: 20px;
+      border-bottom: 2px solid #333;
+    }
+    
+    .header h1 {
+      font-size: 24px;
+      color: #333;
+      margin-bottom: 5px;
+    }
+    
+    .header .subtitle {
+      font-size: 14px;
+      color: #666;
+    }
+    
+    .sheet-section {
+      page-break-inside: avoid;
+      margin-bottom: 40px;
+    }
+    
+    .sheet-title {
+      font-size: 18px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 20px;
+      padding: 10px;
+      background: #f5f5f5;
+      border-left: 4px solid #333;
+    }
+    
+    .chart-container {
+      width: 100%;
+      height: 300px;
+      margin-bottom: 30px;
+    }
+    
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+      font-size: 11px;
+    }
+    
+    th {
+      background: #333;
+      color: #fff;
+      font-weight: bold;
+      padding: 10px 8px;
+      text-align: center;
+      border: 1px solid #333;
+    }
+    
+    th:first-child {
+      text-align: left;
+    }
+    
+    td {
+      padding: 8px;
+      border: 1px solid #ccc;
+      text-align: center;
+    }
+    
+    td:first-child {
+      text-align: left;
+    }
+    
+    tr.role-row {
+      background: #e0e0e0;
+      font-weight: bold;
+    }
+    
+    tr.user-row td:first-child {
+      padding-left: 20px;
+    }
+    
+    tr.grand-total {
+      background: #333;
+      color: #fff;
+      font-weight: bold;
+    }
+    
+    tr.grand-total td {
+      border-color: #333;
+    }
+    
+    .footer {
+      margin-top: 30px;
+      padding-top: 15px;
+      border-top: 1px solid #ccc;
+      font-size: 10px;
+      color: #999;
+      text-align: center;
+    }
+
+    @media print {
+      .sheet-section {
+        page-break-after: always;
+      }
+      .sheet-section:last-child {
+        page-break-after: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Resource Allocation Report</h1>
+    <div class="subtitle">Generated on {{generatedOn}}</div>
+  </div>
+
+  {{#each sheets}}
+  <div class="sheet-section">
+    <div class="sheet-title">{{sheetName}}</div>
+    
+    <div class="chart-container">
+      <canvas id="chart-{{@index}}"></canvas>
+    </div>
+    
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 35%">Role / User</th>
+          <th style="width: 16%">Allocated Hours</th>
+          <th style="width: 16%">Actual Hours</th>
+          <th style="width: 16%">Variance</th>
+          <th style="width: 17%">Effort Utilized</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each rows}}
+        <tr class="{{#if isRole}}role-row{{else}}user-row{{/if}}">
+          <td>{{label}}</td>
+          <td>{{formatNumber plannedTotal}}</td>
+          <td>{{formatNumber actualTotal}}</td>
+          <td>{{formatNumber variance}}</td>
+          <td>{{formatPercent effortPct}}</td>
+        </tr>
+        {{/each}}
+        <tr class="grand-total">
+          <td>GRAND TOTAL</td>
+          <td>{{formatNumber grandTotal.allocated}}</td>
+          <td>{{formatNumber grandTotal.actual}}</td>
+          <td>{{formatNumber grandTotal.variance}}</td>
+          <td>{{formatPercent grandTotal.effortPct}}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  {{/each}}
+
+  <div class="footer">
+    Resource Management Workbench Report • Confidential
+  </div>
+
+  <script>
+    // Register the datalabels plugin
+    Chart.register(ChartDataLabels);
+
+    // Chart data passed from server
+    const chartsData = {{{chartsDataJson}}};
+
+    // Render charts
+    chartsData.forEach((chartData, index) => {
+      const ctx = document.getElementById(`chart-${index}`);
+      if (!ctx) return;
+
+      new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: chartData.labels,
+          datasets: [
+            {
+              label: 'Allocated',
+              data: chartData.allocated,
+              backgroundColor: 'rgba(51, 51, 51, 0.85)',
+              borderColor: '#333',
+              borderWidth: 1
+            },
+            {
+              label: 'Actual',
+              data: chartData.actual,
+              backgroundColor: 'rgba(76, 175, 80, 0.85)',
+              borderColor: '#4CAF50',
+              borderWidth: 1
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'top',
+              labels: {
+                font: { size: 11 }
+              }
+            },
+            title: {
+              display: true,
+              text: 'Hours Planned vs Consumed by Period',
+              font: { size: 14, weight: 'bold' }
+            },
+            datalabels: {
+              anchor: 'end',
+              align: 'top',
+              offset: 2,
+              font: {
+                size: 10,
+                weight: 'bold'
+              },
+              color: '#333',
+              formatter: (value) => {
+                if (value === 0) return '';
+                return value.toLocaleString('en-US', { maximumFractionDigits: 0 });
+              }
+            }
+          },
+          scales: {
+            x: {
+              title: {
+                display: true,
+                text: 'Allocated/Actual Utilization',
+                font: { size: 12, weight: 'bold' }
+              }
+            },
+            y: {
+              beginAtZero: true,
+              title: {
+                display: true,
+                text: 'Hours',
+                font: { size: 12, weight: 'bold' }
+              },
+              ticks: {
+                callback: function(value) {
+                  return value.toLocaleString();
+                }
+              }
+            }
+          }
+        }
+      });
+    });
+  </script>
+</body>
+</html>

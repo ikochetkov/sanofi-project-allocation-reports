@@ -1,5 +1,8 @@
 const express = require('express');
 const ExcelJS = require('exceljs');
+const puppeteer = require('puppeteer');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.json({ 
@@ -457,6 +460,244 @@ app.post('/api/generate-excel', async (req, res) => {
   }
 });
 
+// ============ PDF GENERATION ============
+
+/**
+ * Process payload into PDF-ready data structure
+ * @param {Object} payload - The resource allocation payload
+ * @returns {Object} Processed data for PDF template
+ */
+function processPayloadForPDF(payload) {
+  const sheets = [];
+  const chartsData = [];
+
+  // Normalize to array of sheets
+  const rawSheets = payload.sheets && Array.isArray(payload.sheets)
+    ? payload.sheets
+    : [{ sheetName: 'Resource Allocation', payload: payload }];
+
+  rawSheets.forEach((sheetEntry) => {
+    const sheetName = sheetEntry.sheetName || 'Sheet';
+    const sheetPayload = sheetEntry.payload || payload;
+    const rows = sheetPayload.rows || [];
+    const months = sheetPayload.meta?.months || [];
+
+    // Calculate grand totals from role-level rows
+    let grandTotalAllocated = 0;
+    let grandTotalActual = 0;
+    const monthlyTotals = {};
+
+    rows.filter(r => r.level === 'role').forEach((roleRow) => {
+      grandTotalAllocated += roleRow.plannedTotal || 0;
+      grandTotalActual += roleRow.actualTotal || 0;
+
+      months.forEach((month) => {
+        const monthData = roleRow.months?.[month.key] || { planned: 0, actual: 0 };
+        if (!monthlyTotals[month.key]) {
+          monthlyTotals[month.key] = { label: month.label, planned: 0, actual: 0 };
+        }
+        monthlyTotals[month.key].planned += monthData.planned || 0;
+        monthlyTotals[month.key].actual += monthData.actual || 0;
+      });
+    });
+
+    const grandTotalVariance = grandTotalAllocated - grandTotalActual;
+    const grandTotalEffortPct = grandTotalAllocated > 0 
+      ? (grandTotalActual / grandTotalAllocated) * 100 
+      : 0;
+
+    // Process rows for table
+    const processedRows = rows.map(row => ({
+      label: row.label,
+      plannedTotal: row.plannedTotal || 0,
+      actualTotal: row.actualTotal || 0,
+      variance: (row.plannedTotal || 0) - (row.actualTotal || 0),
+      effortPct: row.effortPct || 0,
+      isRole: row.level === 'role'
+    }));
+
+    sheets.push({
+      sheetName,
+      rows: processedRows,
+      grandTotal: {
+        allocated: grandTotalAllocated,
+        actual: grandTotalActual,
+        variance: grandTotalVariance,
+        effortPct: grandTotalEffortPct
+      }
+    });
+
+    // Chart data for this sheet
+    const chartLabels = months.map(m => m.label);
+    const chartAllocated = months.map(m => monthlyTotals[m.key]?.planned || 0);
+    const chartActual = months.map(m => monthlyTotals[m.key]?.actual || 0);
+
+    chartsData.push({
+      labels: chartLabels,
+      allocated: chartAllocated,
+      actual: chartActual
+    });
+  });
+
+  return {
+    generatedOn: payload.meta?.generatedOn || new Date().toISOString().slice(0, 19).replace('T', ' '),
+    sheets,
+    chartsData
+  };
+}
+
+/**
+ * Simple template engine for PDF HTML
+ */
+function renderTemplate(template, data) {
+  let html = template;
+
+  // Replace {{generatedOn}}
+  html = html.replace(/\{\{generatedOn\}\}/g, data.generatedOn);
+
+  // Replace {{{chartsDataJson}}} (triple braces = no escaping)
+  html = html.replace(/\{\{\{chartsDataJson\}\}\}/g, JSON.stringify(data.chartsData));
+
+  // Process {{#each sheets}} ... {{/each}}
+  const sheetsMatch = html.match(/\{\{#each sheets\}\}([\s\S]*?)\{\{\/each\}\}/);
+  if (sheetsMatch) {
+    const sheetTemplate = sheetsMatch[1];
+    let sheetsHtml = '';
+
+    data.sheets.forEach((sheet, sheetIndex) => {
+      let sheetHtml = sheetTemplate;
+      
+      // Replace sheet-level variables
+      sheetHtml = sheetHtml.replace(/\{\{sheetName\}\}/g, sheet.sheetName);
+      sheetHtml = sheetHtml.replace(/\{\{@index\}\}/g, sheetIndex);
+
+      // Process {{#each rows}} ... {{/each}}
+      const rowsMatch = sheetHtml.match(/\{\{#each rows\}\}([\s\S]*?)\{\{\/each\}\}/);
+      if (rowsMatch) {
+        const rowTemplate = rowsMatch[1];
+        let rowsHtml = '';
+
+        sheet.rows.forEach((row) => {
+          let rowHtml = rowTemplate;
+          
+          // Handle {{#if isRole}}...{{else}}...{{/if}}
+          const ifMatch = rowHtml.match(/\{\{#if isRole\}\}(.*?)\{\{else\}\}(.*?)\{\{\/if\}\}/);
+          if (ifMatch) {
+            rowHtml = rowHtml.replace(ifMatch[0], row.isRole ? ifMatch[1] : ifMatch[2]);
+          }
+
+          rowHtml = rowHtml.replace(/\{\{label\}\}/g, row.label);
+          rowHtml = rowHtml.replace(/\{\{formatNumber plannedTotal\}\}/g, formatNumber(row.plannedTotal));
+          rowHtml = rowHtml.replace(/\{\{formatNumber actualTotal\}\}/g, formatNumber(row.actualTotal));
+          rowHtml = rowHtml.replace(/\{\{formatNumber variance\}\}/g, formatNumber(row.variance));
+          rowHtml = rowHtml.replace(/\{\{formatPercent effortPct\}\}/g, formatPercent(row.effortPct));
+
+          rowsHtml += rowHtml;
+        });
+
+        sheetHtml = sheetHtml.replace(rowsMatch[0], rowsHtml);
+      }
+
+      // Replace grand total values
+      sheetHtml = sheetHtml.replace(/\{\{formatNumber grandTotal\.allocated\}\}/g, formatNumber(sheet.grandTotal.allocated));
+      sheetHtml = sheetHtml.replace(/\{\{formatNumber grandTotal\.actual\}\}/g, formatNumber(sheet.grandTotal.actual));
+      sheetHtml = sheetHtml.replace(/\{\{formatNumber grandTotal\.variance\}\}/g, formatNumber(sheet.grandTotal.variance));
+      sheetHtml = sheetHtml.replace(/\{\{formatPercent grandTotal\.effortPct\}\}/g, formatPercent(sheet.grandTotal.effortPct));
+
+      sheetsHtml += sheetHtml;
+    });
+
+    html = html.replace(sheetsMatch[0], sheetsHtml);
+  }
+
+  return html;
+}
+
+function formatNumber(value) {
+  return (value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatPercent(value) {
+  return (value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%';
+}
+
+/**
+ * Generate PDF from payload
+ * @param {Object} payload - The resource allocation payload
+ * @returns {Buffer} PDF buffer
+ */
+async function generatePDF(payload) {
+  // Load template
+  const templatePath = path.join(__dirname, 'templates', 'pdf-report.html');
+  const template = fs.readFileSync(templatePath, 'utf-8');
+
+  // Process payload
+  const data = processPayloadForPDF(payload);
+
+  // Render template
+  const html = renderTemplate(template, data);
+
+  // Launch Puppeteer and generate PDF
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+
+  const page = await browser.newPage();
+  await page.setContent(html, { waitUntil: 'networkidle0' });
+
+  // Wait for charts to render
+  await page.waitForFunction(() => {
+    const canvases = document.querySelectorAll('canvas');
+    return canvases.length === 0 || Array.from(canvases).every(c => c.getContext('2d'));
+  });
+  await new Promise(resolve => setTimeout(resolve, 500)); // Extra time for Chart.js animations
+
+  const pdfBuffer = await page.pdf({
+    format: 'A4',
+    printBackground: true,
+    margin: { top: '20mm', right: '15mm', bottom: '20mm', left: '15mm' }
+  });
+
+  await browser.close();
+
+  return pdfBuffer;
+}
+
+// PDF Generation Endpoint
+app.post('/api/generate-pdf', async (req, res) => {
+  try {
+    const payload = req.body;
+
+    // Validate payload
+    const isMultiTab = payload.sheets && Array.isArray(payload.sheets);
+    const isSingleSheet = payload.meta && payload.meta.months && payload.rows;
+
+    if (!isMultiTab && !isSingleSheet) {
+      return res.status(400).json({
+        error: 'Invalid payload. Required: either (meta.months + rows) for single sheet, or (sheets[]) for multi-tab format'
+      });
+    }
+
+    const pdfBuffer = await generatePDF(payload);
+
+    // Generate filename with timestamp
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `Resource_Allocation_${timestamp}.pdf`;
+
+    // Set response headers for file download
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+
+    res.end(pdfBuffer);
+
+  } catch (error) {
+    console.error('Error generating PDF:', error);
+    res.status(500).json({ error: 'Failed to generate PDF file', details: error.message });
+  }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -534,7 +775,8 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Resource Allocation Excel API running at http://localhost:${PORT}`);
+  console.log(`🚀 Resource Allocation API running at http://localhost:${PORT}`);
   console.log(`📋 POST /api/generate-excel - Generate Excel from JSON payload`);
+  console.log(`📄 POST /api/generate-pdf - Generate PDF report with charts`);
   console.log(`💊 GET /health - Health check`);
 });
