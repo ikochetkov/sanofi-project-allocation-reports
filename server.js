@@ -399,6 +399,49 @@ function generateSheet(workbook, sheetName, sheetPayload) {
 }
 
 /**
+ * Sanitize sheet name for Excel (31 char limit, no special chars, unique)
+ * @param {string} rawName - The raw sheet name from payload
+ * @param {Object} usedNames - Object tracking used names for uniqueness
+ * @returns {string} Safe, unique sheet name
+ */
+function makeSafeUniqueSheetName(rawName, usedNames = {}) {
+  let name = (rawName || 'Sheet').toString();
+
+  // Remove invalid Excel sheet characters: : \ / ? * [ ]
+  name = name.replace(/[:\\\/\?\*\[\]]/g, ' ');
+
+  // Normalize whitespace (collapse multiple spaces)
+  name = name.replace(/\s+/g, ' ').trim();
+
+  if (!name) name = 'Sheet';
+
+  // Enforce Excel 31-character limit
+  if (name.length > 31) {
+    name = name.substring(0, 31).trim();
+  }
+
+  // Ensure uniqueness
+  const base = name;
+  let counter = 2;
+
+  while (usedNames[name]) {
+    const suffix = ` (${counter})`;
+    const maxBaseLength = 31 - suffix.length;
+    const trimmedBase = base.length > maxBaseLength
+      ? base.substring(0, maxBaseLength).trim()
+      : base;
+
+    name = trimmedBase + suffix;
+    counter++;
+
+    if (counter > 99) break; // safety guard
+  }
+
+  usedNames[name] = true;
+  return name;
+}
+
+/**
  * Generate Excel workbook from payload
  * Supports both single-sheet (legacy) and multi-tab (new) payload formats
  * @param {Object} payload - The resource allocation payload
@@ -406,14 +449,16 @@ function generateSheet(workbook, sheetName, sheetPayload) {
  */
 async function generateExcel(payload) {
   const workbook = new ExcelJS.Workbook();
+  const usedNames = {}; // Track used sheet names for uniqueness
 
   // Check if this is a multi-tab payload (has sheets array)
   if (payload.sheets && Array.isArray(payload.sheets)) {
     // Multi-tab format: iterate over each sheet entry
     payload.sheets.forEach((sheetEntry) => {
-      const sheetName = sheetEntry.sheetName || 'Sheet';
+      const rawName = sheetEntry.sheetName || 'Sheet';
+      const safeName = makeSafeUniqueSheetName(rawName, usedNames);
       const sheetPayload = sheetEntry.payload || { meta: { months: [] }, rows: [] };
-      generateSheet(workbook, sheetName, sheetPayload);
+      generateSheet(workbook, safeName, sheetPayload);
     });
   } else {
     // Legacy single-sheet format
@@ -621,9 +666,9 @@ function renderPDFHtml(data) {
     .header { text-align: center; margin-bottom: 30px; padding-bottom: 20px; border-bottom: 2px solid #333; }
     .header h1 { font-size: 24px; color: #333; margin-bottom: 5px; }
     .header .subtitle { font-size: 14px; color: #666; }
-    .sheet-section { margin-bottom: 40px; page-break-before: always; }
-    .sheet-section:first-of-type { page-break-before: avoid; }
-    .sheet-title { font-size: 18px; font-weight: bold; color: #333; margin-bottom: 20px; padding: 10px; background: #f5f5f5; border-left: 4px solid #333; word-wrap: break-word; }
+    .sheet-section { margin-bottom: 40px; }
+    .sheet-section:not(:first-of-type) { page-break-before: always; }
+    .sheet-title { font-size: 16px; font-weight: bold; color: #333; margin-bottom: 20px; padding: 10px; background: #f5f5f5; border-left: 4px solid #333; }
     .chart-container { width: 100%; height: 300px; margin-bottom: 30px; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 11px; }
     th { background: #333; color: #fff; font-weight: bold; padding: 10px 8px; text-align: center; border: 1px solid #333; }
