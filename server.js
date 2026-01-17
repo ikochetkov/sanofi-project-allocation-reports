@@ -531,6 +531,16 @@ function processPayloadForPDF(payload) {
     // Add project count to Summary title
     if (sheetName === 'Summary') {
       sheetName = `Summary - ${projectCount} projects`;
+    } else {
+      // For project tabs, use the full name from context if available
+      // Format: "PRJ0100697 - Project Name" from context.narrative or sheetName
+      const context = sheetPayload.meta?.context;
+      if (context && context.projectNumber && context.projectName) {
+        sheetName = `${context.projectNumber} - ${context.projectName}`;
+      } else if (context && context.projectNumber) {
+        sheetName = context.projectNumber;
+      }
+      // Otherwise keep original sheetName
     }
 
     // Calculate grand totals from role-level rows
@@ -567,9 +577,39 @@ function processPayloadForPDF(payload) {
       isRole: row.level === 'role'
     }));
 
+    // Extract context block data from payload
+    const context = sheetPayload.meta?.context;
+    let contextBlock = null;
+
+    if (context) {
+      if (context.type === 'summary') {
+        // Summary page context
+        contextBlock = {
+          type: 'summary',
+          title: context.title || 'Summary',
+          description: context.description || '',
+          portfolioSpan: context.date_context?.portfolio_span || null,
+          reportingPeriod: context.date_context?.reporting_period || null,
+          metricDefinitions: context.metric_definitions || null,
+          notes: context.notes || []
+        };
+      } else if (context.type === 'project') {
+        // Project page context
+        contextBlock = {
+          type: 'project',
+          title: context.title || sheetName,
+          description: context.description || '',
+          projectSpan: context.date_context?.project_span || null,
+          reportingPeriod: context.date_context?.reporting_period || null,
+          metricDefinitions: context.metric_definitions || null
+        };
+      }
+    }
+
     sheets.push({
       sheetName,
       rows: processedRows,
+      contextBlock,
       grandTotal: {
         allocated: grandTotalAllocated,
         actual: grandTotalActual,
@@ -604,6 +644,61 @@ function renderPDFHtml(data) {
   const formatNum = (v) => (v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const formatPct = (v) => formatNum(v) + '%';
 
+  // Helper to render context block HTML
+  const renderContextBlock = (contextBlock) => {
+    if (!contextBlock) return '';
+
+    let lines = [];
+
+    if (contextBlock.type === 'summary') {
+      // Summary context block
+      if (contextBlock.description) {
+        lines.push(contextBlock.description);
+      }
+      if (contextBlock.portfolioSpan) {
+        lines.push(`<strong>Portfolio date span:</strong> ${contextBlock.portfolioSpan.start} → ${contextBlock.portfolioSpan.end}`);
+      }
+      if (contextBlock.reportingPeriod) {
+        lines.push(`<strong>Reporting period:</strong> ${contextBlock.reportingPeriod.start} → ${contextBlock.reportingPeriod.end}`);
+      }
+    } else if (contextBlock.type === 'project') {
+      // Project context block
+      if (contextBlock.description) {
+        lines.push(contextBlock.description);
+      }
+      if (contextBlock.projectSpan) {
+        lines.push(`<strong>Project date span:</strong> ${contextBlock.projectSpan.start} → ${contextBlock.projectSpan.end}`);
+      }
+      if (contextBlock.reportingPeriod) {
+        lines.push(`<strong>Reporting period:</strong> ${contextBlock.reportingPeriod.start} → ${contextBlock.reportingPeriod.end}`);
+      }
+    }
+
+    // Add metric definitions
+    if (contextBlock.metricDefinitions) {
+      const defs = contextBlock.metricDefinitions;
+      if (defs.allocated_hours_total) {
+        lines.push(`<strong>Allocated Hours (Total):</strong> ${defs.allocated_hours_total.replace(/^Allocated Hours \(Total\) is the /, '').replace(/^Allocated Hours \(Total\) is /, '')}`);
+      }
+      if (defs.actual_hours_period) {
+        lines.push(`<strong>Actual Hours (Period):</strong> ${defs.actual_hours_period.replace(/^Actual Hours \(Period\) is the /, '').replace(/^Actual Hours \(Period\) is /, '')}`);
+      }
+      if (defs.variance_hours) {
+        lines.push(`<strong>Variance:</strong> ${defs.variance_hours.replace(/^Variance \(Hours\) = /, '')}`);
+      }
+      if (defs.effort_utilized_pct) {
+        lines.push(`<strong>Effort Utilized:</strong> ${defs.effort_utilized_pct.replace(/^Effort Utilized % = /, '')}`);
+      }
+    }
+
+    if (lines.length === 0) return '';
+
+    return `
+      <div class="context-block">
+        ${lines.map(line => `<div class="context-line">${line}</div>`).join('')}
+      </div>`;
+  };
+
   let sheetsHtml = '';
   
   data.sheets.forEach((sheet, idx) => {
@@ -621,10 +716,13 @@ function renderPDFHtml(data) {
         </tr>`;
     });
 
+    // Render context block for this sheet
+    const contextBlockHtml = renderContextBlock(sheet.contextBlock);
+
     sheetsHtml += `
     <div class="sheet-section">
       <div class="sheet-title">${sheet.sheetName}</div>
-      
+      ${contextBlockHtml}
       <div class="chart-container">
         <canvas id="chart-${idx}"></canvas>
       </div>
@@ -661,25 +759,30 @@ function renderPDFHtml(data) {
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
   <style>
+    @page { margin: 15mm; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Segoe UI', Arial, sans-serif; padding: 30px; color: #333; background: #fff; }
-    .header { text-align: center; margin-bottom: 30px; padding-bottom: 20px; border-bottom: 2px solid #333; }
-    .header h1 { font-size: 24px; color: #333; margin-bottom: 5px; }
-    .header .subtitle { font-size: 14px; color: #666; }
-    .sheet-section { margin-bottom: 40px; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; padding: 0; color: #333; background: #fff; }
+    .header { text-align: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 2px solid #333; }
+    .header h1 { font-size: 20px; color: #333; margin-bottom: 2px; }
+    .header .subtitle { font-size: 11px; color: #666; }
+    .sheet-section { margin-bottom: 20px; }
     .sheet-section:not(:first-of-type) { page-break-before: always; }
-    .sheet-title { font-size: 16px; font-weight: bold; color: #333; margin-bottom: 20px; padding: 10px; background: #f5f5f5; border-left: 4px solid #333; }
-    .chart-container { width: 100%; height: 300px; margin-bottom: 30px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 11px; }
-    th { background: #333; color: #fff; font-weight: bold; padding: 10px 8px; text-align: center; border: 1px solid #333; }
+    .sheet-title { font-size: 14px; font-weight: bold; color: #333; margin-bottom: 10px; padding: 8px; background: #f5f5f5; border-left: 4px solid #333; }
+    .context-block { background: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 4px; padding: 10px 12px; margin-bottom: 15px; font-size: 9pt; line-height: 1.4; color: #444; }
+    .context-line { margin-bottom: 3px; }
+    .context-line:last-child { margin-bottom: 0; }
+    .context-line strong { color: #333; }
+    .chart-container { width: 100%; height: 250px; margin-bottom: 20px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 10px; }
+    th { background: #333; color: #fff; font-weight: bold; padding: 8px 6px; text-align: center; border: 1px solid #333; }
     th:first-child { text-align: left; }
-    td { padding: 8px; border: 1px solid #ccc; text-align: center; }
+    td { padding: 6px; border: 1px solid #ccc; text-align: center; }
     td:first-child { text-align: left; }
     tr.role-row { background: #e0e0e0; font-weight: bold; }
-    tr.user-row td:first-child { padding-left: 20px; }
+    tr.user-row td:first-child { padding-left: 15px; }
     tr.grand-total { background: #333; color: #fff; font-weight: bold; }
     tr.grand-total td { border-color: #333; }
-    .footer { margin-top: 30px; padding-top: 15px; border-top: 1px solid #ccc; font-size: 10px; color: #999; text-align: center; }
+    .footer { margin-top: 20px; padding-top: 10px; border-top: 1px solid #ccc; font-size: 9px; color: #999; text-align: center; }
   </style>
 </head>
 <body>
@@ -766,7 +869,7 @@ async function generatePDF(payload) {
   const pdfBuffer = await page.pdf({
     format: 'A4',
     printBackground: true,
-    margin: { top: '20mm', right: '15mm', bottom: '20mm', left: '15mm' }
+    margin: { top: '15mm', right: '15mm', bottom: '15mm', left: '15mm' }
   });
 
   await browser.close();
