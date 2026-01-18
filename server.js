@@ -606,10 +606,13 @@ function processPayloadForPDF(payload) {
       }
     }
 
+    const isSummary = sheetEntry.sheetName === 'Summary';
+
     sheets.push({
       sheetName,
       rows: processedRows,
       contextBlock,
+      isSummary,
       grandTotal: {
         allocated: grandTotalAllocated,
         actual: grandTotalActual,
@@ -630,18 +633,359 @@ function processPayloadForPDF(payload) {
     });
   });
 
+  // Collect data for stacked bar chart (projects only, for Summary page)
+  // Extract just the project name (remove PRJ number and "Sanofi - " prefix)
+  const extractProjectName = (sheetName) => {
+    // Pattern: "PRJ0002756 - Sanofi - Azure Arc Deployment" → "Azure Arc Deployment"
+    // Or: "PRJ0002756 - Project Name" → "Project Name"
+    let name = sheetName;
+    // Remove PRJ number prefix (e.g., "PRJ0002756 - ")
+    name = name.replace(/^PRJ\d+\s*-\s*/, '');
+    // Remove "Sanofi - " prefix if present
+    name = name.replace(/^Sanofi\s*-\s*/i, '');
+    // Truncate if still too long
+    if (name.length > 25) {
+      name = name.substring(0, 22) + '...';
+    }
+    return name;
+  };
+
+  const projectsBarData = sheets
+    .filter(s => !s.isSummary)
+    .map(s => ({
+      label: extractProjectName(s.sheetName),
+      fullName: s.sheetName,  // Keep full name for table
+      allocated: s.grandTotal.allocated,
+      used: s.grandTotal.actual,
+      unused: Math.max(0, s.grandTotal.allocated - s.grandTotal.actual),
+      utilization: s.grandTotal.effortPct
+    }));
+
   return {
     generatedOn: payload.meta?.generatedOn || new Date().toISOString().slice(0, 19).replace('T', ' '),
     sheets,
-    chartsData
+    chartsData,
+    projectsBarData
   };
+}
+
+/**
+ * Build SVG gauge (semi-circular) with overflow wedge support
+ * @param {number} actualHours - Actual hours consumed
+ * @param {number} plannedHours - Planned/allocated hours
+ * @returns {string} SVG markup string
+ */
+function buildGaugeSVG(actualHours, plannedHours) {
+  const width = 320;
+  const height = 200;
+  const strokeWidth = 40;
+  const cx = width / 2;
+  const cy = height - 30;
+  const r = Math.min(width / 2 - strokeWidth / 2 - 10, height - strokeWidth / 2 - 20);
+  
+  // Calculate percentage
+  const pct = plannedHours > 0 ? (actualHours / plannedHours) * 100 : 0;
+  const basePct = Math.max(0, Math.min(100, pct));
+  const overflowPct = Math.max(0, pct - 100);
+  
+  // Colors
+  const fillColor = '#4F7F2D';  // Green for main gauge
+  const bgColor = '#E6E6E6';    // Light gray background
+  const overflowColor = '#A8C98C'; // Lighter green for overflow
+  
+  // Helper: polar to cartesian
+  function polarToCartesian(cx, cy, r, deg) {
+    const rad = (deg * Math.PI) / 180;
+    return {
+      x: cx + r * Math.cos(rad),
+      y: cy - r * Math.sin(rad)
+    };
+  }
+  
+  // Helper: describe arc path
+  function describeArc(cx, cy, r, startDeg, endDeg) {
+    const start = polarToCartesian(cx, cy, r, startDeg);
+    const end = polarToCartesian(cx, cy, r, endDeg);
+    const largeArcFlag = Math.abs(endDeg - startDeg) > 180 ? 1 : 0;
+    const sweepFlag = startDeg > endDeg ? 1 : 0;
+    
+    return [
+      'M', start.x, start.y,
+      'A', r, r, 0, largeArcFlag, sweepFlag, end.x, end.y
+    ].join(' ');
+  }
+  
+  // Arc angles: 180° (left) to 0° (right) for half circle
+  const theta = 180 - (basePct / 100) * 180;
+  
+  // Background arc (full half circle)
+  const bgPath = describeArc(cx, cy, r, 180, 0);
+  
+  // Value arc (from left to progress point)
+  const valPath = basePct > 0 ? describeArc(cx, cy, r, 180, theta) : '';
+  
+  // Overflow wedge (beyond 100%, cap at 50% visually)
+  const overflowCapPct = 50;
+  const overflowShownPct = Math.min(overflowPct, overflowCapPct);
+  const overflowDeg = (overflowShownPct / 100) * 90; // Max 45 degrees for overflow
+  const overflowPath = overflowShownPct > 0 ? describeArc(cx, cy, r, 0, -overflowDeg) : '';
+  
+  return `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+  <!-- Background arc -->
+  <path d="${bgPath}" fill="none" stroke="${bgColor}" stroke-width="${strokeWidth}" stroke-linecap="butt" />
+  
+  <!-- Value arc -->
+  ${valPath ? `<path d="${valPath}" fill="none" stroke="${fillColor}" stroke-width="${strokeWidth}" stroke-linecap="butt" />` : ''}
+  
+  <!-- Overflow wedge -->
+  ${overflowPath ? `<path d="${overflowPath}" fill="none" stroke="${overflowColor}" stroke-width="${strokeWidth}" stroke-linecap="butt" />` : ''}
+  
+  <!-- Center percentage label -->
+  <text x="${cx}" y="${cy - strokeWidth * 0.3}" text-anchor="middle" dominant-baseline="middle"
+        font-family="Arial, sans-serif" font-size="36" font-weight="700" fill="#000">
+    ${pct.toFixed(1)}%
+  </text>
+  
+  <!-- Left tick label (0%) -->
+  <text x="${strokeWidth * 0.5}" y="${height + 18}" text-anchor="start" 
+        font-family="Arial, sans-serif" font-size="14" font-weight="600" fill="#355B1B">0%</text>
+  
+  <!-- Right tick label (100%) -->
+  <text x="${width - strokeWidth * 0.5}" y="${height + 18}" text-anchor="end" 
+        font-family="Arial, sans-serif" font-size="14" font-weight="600" fill="#355B1B">100%</text>
+</svg>`.trim();
+}
+
+/**
+ * Build SVG grouped bar chart for Hours Planned vs Consumed by Period
+ * @param {Object} chartData - { labels: string[], allocated: number[], actual: number[] }
+ * @returns {string} SVG markup string
+ */
+function buildBarChartSVG(chartData) {
+  const width = 700;
+  const height = 280;
+  const marginTop = 40;
+  const marginRight = 30;
+  const marginBottom = 60;
+  const marginLeft = 60;
+  
+  const chartWidth = width - marginLeft - marginRight;
+  const chartHeight = height - marginTop - marginBottom;
+  
+  const labels = chartData.labels || [];
+  const allocated = chartData.allocated || [];
+  const actual = chartData.actual || [];
+  
+  if (labels.length === 0) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+      <text x="${width/2}" y="${height/2}" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#666">No data available</text>
+    </svg>`;
+  }
+  
+  // Calculate max value for Y axis
+  const allValues = [...allocated, ...actual];
+  const maxVal = Math.max(...allValues, 1);
+  const yMax = Math.ceil(maxVal / 100) * 100 || 100; // Round up to nearest 100
+  
+  // Bar dimensions
+  const groupWidth = chartWidth / labels.length;
+  const barWidth = groupWidth * 0.35;
+  const barGap = groupWidth * 0.05;
+  
+  // Colors
+  const allocatedColor = '#333333';
+  const actualColor = '#4CAF50';
+  
+  // Format number for display
+  const formatNum = (v) => Math.round(v).toLocaleString('en-US');
+  
+  // Build Y axis ticks
+  const yTicks = 5;
+  const yTickStep = yMax / yTicks;
+  let yAxisHtml = '';
+  for (let i = 0; i <= yTicks; i++) {
+    const val = i * yTickStep;
+    const y = marginTop + chartHeight - (val / yMax) * chartHeight;
+    yAxisHtml += `
+      <line x1="${marginLeft}" y1="${y}" x2="${marginLeft + chartWidth}" y2="${y}" stroke="#e0e0e0" stroke-width="1" />
+      <text x="${marginLeft - 8}" y="${y + 4}" text-anchor="end" font-family="Arial, sans-serif" font-size="10" fill="#666">${formatNum(val)}</text>`;
+  }
+  
+  // Build bars
+  let barsHtml = '';
+  labels.forEach((label, i) => {
+    const groupX = marginLeft + i * groupWidth + groupWidth * 0.15;
+    
+    // Allocated bar
+    const allocHeight = (allocated[i] / yMax) * chartHeight;
+    const allocY = marginTop + chartHeight - allocHeight;
+    barsHtml += `
+      <rect x="${groupX}" y="${allocY}" width="${barWidth}" height="${allocHeight}" fill="${allocatedColor}" />
+      <text x="${groupX + barWidth/2}" y="${allocY - 5}" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#333">${allocated[i] > 0 ? formatNum(allocated[i]) : ''}</text>`;
+    
+    // Actual bar
+    const actHeight = (actual[i] / yMax) * chartHeight;
+    const actY = marginTop + chartHeight - actHeight;
+    const actX = groupX + barWidth + barGap;
+    barsHtml += `
+      <rect x="${actX}" y="${actY}" width="${barWidth}" height="${actHeight}" fill="${actualColor}" />
+      <text x="${actX + barWidth/2}" y="${actY - 5}" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#333">${actual[i] > 0 ? formatNum(actual[i]) : ''}</text>`;
+    
+    // X axis label
+    const labelX = groupX + barWidth + barGap/2;
+    barsHtml += `
+      <text x="${labelX}" y="${marginTop + chartHeight + 20}" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#333">${label}</text>`;
+  });
+  
+  return `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+  <!-- Title -->
+  <text x="${width/2}" y="20" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#333">Hours Planned vs Consumed by Period</text>
+  
+  <!-- Y axis -->
+  <line x1="${marginLeft}" y1="${marginTop}" x2="${marginLeft}" y2="${marginTop + chartHeight}" stroke="#333" stroke-width="1" />
+  <text x="${15}" y="${marginTop + chartHeight/2}" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#333" transform="rotate(-90, 15, ${marginTop + chartHeight/2})">Hours</text>
+  ${yAxisHtml}
+  
+  <!-- X axis -->
+  <line x1="${marginLeft}" y1="${marginTop + chartHeight}" x2="${marginLeft + chartWidth}" y2="${marginTop + chartHeight}" stroke="#333" stroke-width="1" />
+  <text x="${marginLeft + chartWidth/2}" y="${height - 10}" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#333">Allocated/Actual Utilization</text>
+  
+  <!-- Bars -->
+  ${barsHtml}
+  
+  <!-- Legend -->
+  <rect x="${width - 180}" y="8" width="14" height="14" fill="${allocatedColor}" />
+  <text x="${width - 162}" y="19" font-family="Arial, sans-serif" font-size="11" fill="#333">Allocated</text>
+  <rect x="${width - 90}" y="8" width="14" height="14" fill="${actualColor}" />
+  <text x="${width - 72}" y="19" font-family="Arial, sans-serif" font-size="11" fill="#333">Actual</text>
+</svg>`.trim();
+}
+
+/**
+ * Build SVG vertical stacked bar chart for Allocated vs Actual Hours by Project
+ * @param {Array} projectsData - Array of { label: string, used: number, unused: number }
+ * @returns {string} SVG markup string
+ */
+function buildProjectsBarChartSVG(projectsData) {
+  const width = 700;
+  const height = 300;
+  const marginTop = 40;
+  const marginRight = 30;
+  const marginBottom = 80;
+  const marginLeft = 60;
+  
+  const chartWidth = width - marginLeft - marginRight;
+  const chartHeight = height - marginTop - marginBottom;
+  
+  if (!projectsData || projectsData.length === 0) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+      <text x="${width/2}" y="${height/2}" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#666">No project data available</text>
+    </svg>`;
+  }
+  
+  // Calculate max value for Y axis (total of used + unused)
+  const maxVal = Math.max(...projectsData.map(p => p.used + p.unused), 1);
+  const yMax = Math.ceil(maxVal / 100) * 100 || 100;
+  
+  // Bar dimensions
+  const barWidth = Math.min(60, (chartWidth / projectsData.length) * 0.7);
+  const barSpacing = chartWidth / projectsData.length;
+  
+  // Colors
+  const usedColor = '#4F7F2D';     // Green for used/actual
+  const unusedColor = '#E6E6E6';   // Light gray for unused/remaining
+  
+  // Format number for display
+  const formatNum = (v) => Math.round(v).toLocaleString('en-US');
+  
+  // Build Y axis ticks
+  const yTicks = 5;
+  const yTickStep = yMax / yTicks;
+  let yAxisHtml = '';
+  for (let i = 0; i <= yTicks; i++) {
+    const val = i * yTickStep;
+    const y = marginTop + chartHeight - (val / yMax) * chartHeight;
+    yAxisHtml += `
+      <line x1="${marginLeft}" y1="${y}" x2="${marginLeft + chartWidth}" y2="${y}" stroke="#e0e0e0" stroke-width="1" />
+      <text x="${marginLeft - 8}" y="${y + 4}" text-anchor="end" font-family="Arial, sans-serif" font-size="10" fill="#666">${formatNum(val)}</text>`;
+  }
+  
+  // Build stacked bars
+  let barsHtml = '';
+  projectsData.forEach((project, i) => {
+    const barX = marginLeft + i * barSpacing + (barSpacing - barWidth) / 2;
+    const total = project.used + project.unused;
+    const utilPct = total > 0 ? (project.used / total) * 100 : 0;
+    
+    // Unused bar (bottom - full height)
+    const totalHeight = (total / yMax) * chartHeight;
+    const totalY = marginTop + chartHeight - totalHeight;
+    barsHtml += `
+      <rect x="${barX}" y="${totalY}" width="${barWidth}" height="${totalHeight}" fill="${unusedColor}" stroke="#ccc" stroke-width="1" />`;
+    
+    // Used bar (on top of unused, from bottom)
+    const usedHeight = (project.used / yMax) * chartHeight;
+    const usedY = marginTop + chartHeight - usedHeight;
+    barsHtml += `
+      <rect x="${barX}" y="${usedY}" width="${barWidth}" height="${usedHeight}" fill="${usedColor}" stroke="#3d6423" stroke-width="1" />`;
+    
+    // Value label on top of bar (show percentage instead of total)
+    if (total > 0) {
+      barsHtml += `
+        <text x="${barX + barWidth/2}" y="${totalY - 5}" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#333">${utilPct.toFixed(1)}%</text>`;
+    }
+    
+    // X axis label (rotated for readability)
+    const labelX = barX + barWidth / 2;
+    const labelY = marginTop + chartHeight + 12;
+    barsHtml += `
+      <text x="${labelX}" y="${labelY}" text-anchor="start" font-family="Arial, sans-serif" font-size="9" fill="#333" transform="rotate(45, ${labelX}, ${labelY})">${project.label}</text>`;
+  });
+  
+  return `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+  <!-- Title -->
+  <text x="${width/2}" y="20" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#333">Allocated vs Actual Hours by Project</text>
+  
+  <!-- Y axis -->
+  <line x1="${marginLeft}" y1="${marginTop}" x2="${marginLeft}" y2="${marginTop + chartHeight}" stroke="#333" stroke-width="1" />
+  <text x="${15}" y="${marginTop + chartHeight/2}" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#333" transform="rotate(-90, 15, ${marginTop + chartHeight/2})">Hours</text>
+  ${yAxisHtml}
+  
+  <!-- X axis -->
+  <line x1="${marginLeft}" y1="${marginTop + chartHeight}" x2="${marginLeft + chartWidth}" y2="${marginTop + chartHeight}" stroke="#333" stroke-width="1" />
+  
+  <!-- Bars -->
+  ${barsHtml}
+  
+  <!-- Legend -->
+  <rect x="${width - 220}" y="8" width="14" height="14" fill="${usedColor}" stroke="#3d6423" stroke-width="1" />
+  <text x="${width - 202}" y="19" font-family="Arial, sans-serif" font-size="10" fill="#333">Used (Actual)</text>
+  <rect x="${width - 110}" y="8" width="14" height="14" fill="${unusedColor}" stroke="#ccc" stroke-width="1" />
+  <text x="${width - 92}" y="19" font-family="Arial, sans-serif" font-size="10" fill="#333">Unused</text>
+</svg>`.trim();
 }
 
 /**
  * Render HTML from data (replaces template engine)
  */
 function renderPDFHtml(data) {
-  const formatNum = (v) => (v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Format number: show 2 decimals only if needed, otherwise show integer
+  const formatNum = (v) => {
+    const num = v || 0;
+    // Check if it's a whole number
+    if (num === Math.floor(num)) {
+      return Math.floor(num).toLocaleString('en-US');
+    }
+    // Check if decimals are .00
+    const formatted = num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (formatted.endsWith('.00')) {
+      return Math.floor(num).toLocaleString('en-US');
+    }
+    return formatted;
+  };
   const formatPct = (v) => formatNum(v) + '%';
 
   // Helper to render context block HTML
@@ -719,12 +1063,76 @@ function renderPDFHtml(data) {
     // Render context block for this sheet
     const contextBlockHtml = renderContextBlock(sheet.contextBlock);
 
+    // Gauge chart data for this sheet
+    const gaugePercent = sheet.grandTotal.effortPct;
+    const gaugeAllocated = sheet.grandTotal.allocated;
+    const gaugeActual = sheet.grandTotal.actual;
+    
+    // Build SVG gauge
+    const gaugeSvg = buildGaugeSVG(gaugeActual, gaugeAllocated);
+    
+    // Build SVG bar chart for this sheet
+    const barChartSvg = buildBarChartSVG(data.chartsData[idx]);
+
+    // Build SVG projects bar chart for Summary page
+    const projectsBarChartSvg = sheet.isSummary ? buildProjectsBarChartSVG(data.projectsBarData) : '';
+
     sheetsHtml += `
     <div class="sheet-section">
       <div class="sheet-title">${sheet.sheetName}</div>
       ${contextBlockHtml}
-      <div class="chart-container">
-        <canvas id="chart-${idx}"></canvas>
+      
+      <!-- SVG Gauge Chart Section -->
+      <div class="gauge-wrapper">
+        <div class="gauge-svg-container">
+          ${gaugeSvg}
+        </div>
+        <div class="kpi-block">
+          <div class="kpi-item">
+            <div class="kpi-label">Actual Hours<br/>Consumed</div>
+            <div class="kpi-value">${formatNum(gaugeActual)}</div>
+          </div>
+          <div class="kpi-item">
+            <div class="kpi-label">Planned Hours<br/>Allocated</div>
+            <div class="kpi-value">${formatNum(gaugeAllocated)}</div>
+          </div>
+          <div class="kpi-item">
+            <div class="kpi-label">Percent Hours<br/>Consumed</div>
+            <div class="kpi-value">${gaugePercent.toFixed(1)}%</div>
+          </div>
+        </div>
+      </div>
+      
+      ${sheet.isSummary ? `
+      <!-- SVG Projects Bar Chart (Summary Only) -->
+      <div class="projects-bar-container">
+        ${projectsBarChartSvg}
+      </div>
+      
+      <!-- Projects Summary Table -->
+      <table class="projects-table">
+        <thead>
+          <tr>
+            <th style="width: 50%">Project Name</th>
+            <th style="width: 17%">Allocated Hours</th>
+            <th style="width: 17%">Actual Hours</th>
+            <th style="width: 16%">Utilization</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.projectsBarData.map(p => `
+          <tr>
+            <td class="project-name-cell">${p.fullName}</td>
+            <td>${formatNum(p.allocated)}</td>
+            <td>${formatNum(p.used)}</td>
+            <td>${p.utilization.toFixed(1)}%</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>` : ''}
+      
+      <!-- SVG Bar Chart -->
+      <div class="bar-chart-container">
+        ${barChartSvg}
       </div>
       
       <table>
@@ -756,15 +1164,20 @@ function renderPDFHtml(data) {
 <head>
   <meta charset="UTF-8">
   <title>Resource Allocation Report</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
   <style>
     @page { margin: 15mm; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: 'Segoe UI', Arial, sans-serif; padding: 0; color: #333; background: #fff; }
-    .header { text-align: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 2px solid #333; }
-    .header h1 { font-size: 20px; color: #333; margin-bottom: 2px; }
-    .header .subtitle { font-size: 11px; color: #666; }
+    .header { text-align: center; margin-bottom: 0; padding: 60px 40px 40px; border-bottom: none; page-break-after: always; min-height: 100vh; display: flex; flex-direction: column; justify-content: flex-start; align-items: center; background: #fff; }
+    .header h1 { font-size: 36px; color: #333; margin-bottom: 10px; font-weight: 700; letter-spacing: 1px; margin-top: 40px; }
+    .header .company-name { font-size: 28px; color: #4F7F2D; font-weight: 600; margin-bottom: 20px; }
+    .header .subtitle { font-size: 12px; color: #666; margin-bottom: 50px; }
+    .toc { width: 100%; max-width: 500px; text-align: left; margin-top: 20px; }
+    .toc-title { font-size: 16px; font-weight: 700; color: #333; margin-bottom: 15px; padding-bottom: 8px; border-bottom: 2px solid #4F7F2D; }
+    .toc-item { display: flex; justify-content: space-between; align-items: baseline; padding: 8px 0; border-bottom: 1px dotted #ccc; font-size: 11px; }
+    .toc-item:last-child { border-bottom: none; }
+    .toc-name { color: #333; flex: 1; padding-right: 10px; }
+    .toc-page { color: #666; font-weight: 600; white-space: nowrap; }
     .sheet-section { margin-bottom: 20px; }
     .sheet-section:not(:first-of-type) { page-break-before: always; }
     .sheet-title { font-size: 14px; font-weight: bold; color: #333; margin-bottom: 10px; padding: 8px; background: #f5f5f5; border-left: 4px solid #333; }
@@ -772,7 +1185,20 @@ function renderPDFHtml(data) {
     .context-line { margin-bottom: 3px; }
     .context-line:last-child { margin-bottom: 0; }
     .context-line strong { color: #333; }
-    .chart-container { width: 100%; height: 250px; margin-bottom: 20px; }
+    .gauge-wrapper { display: flex; align-items: center; justify-content: center; gap: 30px; margin-bottom: 20px; width: 70%; margin-left: auto; margin-right: auto; padding: 20px 30px; }
+    .gauge-svg-container { flex: 1 1 auto; max-width: 320px; }
+    .gauge-svg-container svg { width: 100%; height: auto; }
+    .kpi-block { width: 180px; text-align: right; }
+    .kpi-item { margin-bottom: 12px; }
+    .kpi-item:last-child { margin-bottom: 0; }
+    .kpi-label { font-size: 10px; line-height: 1.3; color: #355B1B; }
+    .kpi-value { font-size: 22px; font-weight: 700; color: #333; margin-top: 2px; }
+    .projects-bar-container { width: 100%; margin-bottom: 15px; }
+    .projects-bar-container svg { width: 100%; height: auto; }
+    .projects-table { margin-bottom: 20px; }
+    .projects-table .project-name-cell { text-align: left; line-height: 1.3; word-wrap: break-word; }
+    .bar-chart-container { width: 100%; margin-bottom: 20px; }
+    .bar-chart-container svg { width: 100%; height: auto; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 10px; }
     th { background: #333; color: #fff; font-weight: bold; padding: 8px 6px; text-align: center; border: 1px solid #333; }
     th:first-child { text-align: left; }
@@ -788,7 +1214,17 @@ function renderPDFHtml(data) {
 <body>
   <div class="header">
     <h1>Resource Allocation Report</h1>
+    <div class="company-name">Sanofi</div>
     <div class="subtitle">Generated on ${data.generatedOn}</div>
+    
+    <div class="toc">
+      <div class="toc-title">Table of Contents</div>
+      ${data.sheets.map((sheet, idx) => `
+      <div class="toc-item">
+        <span class="toc-name">${sheet.sheetName}</span>
+        <span class="toc-page">Page ${idx + 2}</span>
+      </div>`).join('')}
+    </div>
   </div>
 
   ${sheetsHtml}
@@ -796,44 +1232,6 @@ function renderPDFHtml(data) {
   <div class="footer">
     Resource Management Workbench Report • Confidential
   </div>
-
-  <script>
-    Chart.register(ChartDataLabels);
-    const chartsData = ${JSON.stringify(data.chartsData)};
-    
-    chartsData.forEach((chartData, index) => {
-      const ctx = document.getElementById('chart-' + index);
-      if (!ctx) return;
-
-      new Chart(ctx, {
-        type: 'bar',
-        data: {
-          labels: chartData.labels,
-          datasets: [
-            { label: 'Allocated', data: chartData.allocated, backgroundColor: 'rgba(51, 51, 51, 0.85)', borderColor: '#333', borderWidth: 1 },
-            { label: 'Actual', data: chartData.actual, backgroundColor: 'rgba(76, 175, 80, 0.85)', borderColor: '#4CAF50', borderWidth: 1 }
-          ]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: {
-            legend: { position: 'top', labels: { font: { size: 11 } } },
-            title: { display: true, text: 'Hours Planned vs Consumed by Period', font: { size: 14, weight: 'bold' } },
-            datalabels: {
-              anchor: 'end', align: 'top', offset: 2,
-              font: { size: 10, weight: 'bold' }, color: '#333',
-              formatter: (value) => value === 0 ? '' : value.toLocaleString('en-US', { maximumFractionDigits: 0 })
-            }
-          },
-          scales: {
-            x: { title: { display: true, text: 'Allocated/Actual Utilization', font: { size: 12, weight: 'bold' } } },
-            y: { beginAtZero: true, title: { display: true, text: 'Hours', font: { size: 12, weight: 'bold' } }, ticks: { callback: function(v) { return v.toLocaleString(); } } }
-          }
-        }
-      });
-    });
-  </script>
 </body>
 </html>`;
 }
