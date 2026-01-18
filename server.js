@@ -971,7 +971,9 @@ function buildProjectsBarChartSVG(projectsData) {
 /**
  * Render HTML from data (replaces template engine)
  */
-function renderPDFHtml(data) {
+function renderPDFHtml(data, options = {}) {
+  const { hideUserAllocatedData = false } = options;
+  
   // Format number: show 2 decimals only if needed, otherwise show integer
   const formatNum = (v) => {
     const num = v || 0;
@@ -1050,13 +1052,20 @@ function renderPDFHtml(data) {
     let rowsHtml = '';
     sheet.rows.forEach(row => {
       const rowClass = row.isRole ? 'role-row' : 'user-row';
+      const isUser = !row.isRole;
+      
+      // For simple PDF, hide Allocated, Variance, Effort for user rows
+      const allocatedValue = (hideUserAllocatedData && isUser) ? '' : formatNum(row.plannedTotal);
+      const varianceValue = (hideUserAllocatedData && isUser) ? '' : formatNum(row.variance);
+      const effortValue = (hideUserAllocatedData && isUser) ? '' : formatPct(row.effortPct);
+      
       rowsHtml += `
         <tr class="${rowClass}">
           <td>${row.label}</td>
-          <td>${formatNum(row.plannedTotal)}</td>
+          <td>${allocatedValue}</td>
           <td>${formatNum(row.actualTotal)}</td>
-          <td>${formatNum(row.variance)}</td>
-          <td>${formatPct(row.effortPct)}</td>
+          <td>${varianceValue}</td>
+          <td>${effortValue}</td>
         </tr>`;
     });
 
@@ -1239,14 +1248,16 @@ function renderPDFHtml(data) {
 /**
  * Generate PDF from payload
  * @param {Object} payload - The resource allocation payload
+ * @param {Object} options - Generation options
+ * @param {boolean} options.hideUserAllocatedData - If true, hide Allocated, Variance, Effort for user rows
  * @returns {Buffer} PDF buffer
  */
-async function generatePDF(payload) {
+async function generatePDF(payload, options = {}) {
   // Process payload
   const data = processPayloadForPDF(payload);
 
   // Render HTML directly (no template file needed now)
-  const html = renderPDFHtml(data);
+  const html = renderPDFHtml(data, options);
 
   // Launch Puppeteer and generate PDF
   const browser = await puppeteer.launch({
@@ -1275,8 +1286,8 @@ async function generatePDF(payload) {
   return pdfBuffer;
 }
 
-// PDF Generation Endpoint
-app.post('/api/generate-pdf', async (req, res) => {
+// PDF Generation Endpoint (Extended - shows all data)
+app.post('/api/generate-pdf-extended', async (req, res) => {
   try {
     const payload = req.body;
 
@@ -1291,6 +1302,41 @@ app.post('/api/generate-pdf', async (req, res) => {
     }
 
     const pdfBuffer = await generatePDF(payload);
+
+    // Generate filename with timestamp
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `Resource_Allocation_Extended_${timestamp}.pdf`;
+
+    // Set response headers for file download
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+
+    res.end(pdfBuffer);
+
+  } catch (error) {
+    console.error('Error generating PDF:', error);
+    res.status(500).json({ error: 'Failed to generate PDF file', details: error.message });
+  }
+});
+
+// PDF Generation Endpoint (Simple - hides user-level Allocated, Variance, Effort columns)
+app.post('/api/generate-pdf', async (req, res) => {
+  try {
+    const payload = req.body;
+
+    // Validate payload
+    const isMultiTab = payload.sheets && Array.isArray(payload.sheets);
+    const isSingleSheet = payload.meta && payload.meta.months && payload.rows;
+
+    if (!isMultiTab && !isSingleSheet) {
+      return res.status(400).json({
+        error: 'Invalid payload. Required: either (meta.months + rows) for single sheet, or (sheets[]) for multi-tab format'
+      });
+    }
+
+    // Pass option to hide user-level data
+    const pdfBuffer = await generatePDF(payload, { hideUserAllocatedData: true });
 
     // Generate filename with timestamp
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -1388,6 +1434,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Resource Allocation API running at http://localhost:${PORT}`);
   console.log(`📋 POST /api/generate-excel - Generate Excel from JSON payload`);
-  console.log(`📄 POST /api/generate-pdf - Generate PDF report with charts`);
+  console.log(`📄 POST /api/generate-pdf - Generate PDF report (simplified: user allocation data hidden)`);
+  console.log(`📄 POST /api/generate-pdf-extended - Generate PDF report (full data for all rows)`);
   console.log(`💊 GET /health - Health check`);
 });
