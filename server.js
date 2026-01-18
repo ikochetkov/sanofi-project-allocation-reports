@@ -32,6 +32,40 @@ app.use((err, req, res, next) => {
 });
 
 /**
+ * Validate payload for required to-date effort fields
+ * @param {Object} payload - The resource allocation payload
+ * @throws {Error} If required fields are missing
+ */
+function validatePayloadFields(payload) {
+  const errors = [];
+  
+  // Normalize to array of sheets
+  const sheets = payload.sheets && Array.isArray(payload.sheets)
+    ? payload.sheets
+    : [{ sheetName: 'Sheet', payload: payload }];
+  
+  sheets.forEach((sheetEntry, sheetIdx) => {
+    const sheetPayload = sheetEntry.payload || payload;
+    const rows = sheetPayload.rows || [];
+    const sheetName = sheetEntry.sheetName || `Sheet ${sheetIdx + 1}`;
+    
+    rows.forEach((row, rowIdx) => {
+      if (row.allocated_effort_to_date === undefined) {
+        errors.push(`Sheet "${sheetName}", row ${rowIdx + 1} (${row.label || 'unnamed'}): missing required field 'allocated_effort_to_date'`);
+      }
+      if (row.actual_effort_to_date === undefined) {
+        errors.push(`Sheet "${sheetName}", row ${rowIdx + 1} (${row.label || 'unnamed'}): missing required field 'actual_effort_to_date'`);
+      }
+    });
+  });
+  
+  if (errors.length > 0) {
+    const errorMsg = `Payload validation failed. Required fields missing:\n${errors.slice(0, 10).join('\n')}${errors.length > 10 ? `\n... and ${errors.length - 10} more errors` : ''}`;
+    throw new Error(errorMsg);
+  }
+}
+
+/**
  * Resource Allocation Excel Export
  * Generates Excel file matching ServiceNow RMW visual structure
  */
@@ -118,18 +152,18 @@ function generateSheet(workbook, sheetName, sheetPayload) {
   headerRow1.getCell(1).alignment = { vertical: 'middle', horizontal: 'center' };
   headerRow2.getCell(1).border = BORDER_STYLE;
 
-  // Merge B1:B2 - Allocated Hours
+  // Merge B1:B2 - Allocated (To Date)
   sheet.mergeCells(1, 2, 2, 2);
-  headerRow1.getCell(2).value = 'Allocated Hours';
+  headerRow1.getCell(2).value = 'Allocated (To Date)';
   headerRow1.getCell(2).font = HEADER_FONT;
   headerRow1.getCell(2).fill = HEADER_FILL;
   headerRow1.getCell(2).border = BORDER_STYLE;
   headerRow1.getCell(2).alignment = { vertical: 'middle', horizontal: 'center' };
   headerRow2.getCell(2).border = BORDER_STYLE;
 
-  // Merge C1:C2 - Actual Hours
+  // Merge C1:C2 - Actual (To Date)
   sheet.mergeCells(1, 3, 2, 3);
-  headerRow1.getCell(3).value = 'Actual Hours';
+  headerRow1.getCell(3).value = 'Actual (To Date)';
   headerRow1.getCell(3).font = HEADER_FONT;
   headerRow1.getCell(3).fill = HEADER_FILL;
   headerRow1.getCell(3).border = BORDER_STYLE;
@@ -145,9 +179,9 @@ function generateSheet(workbook, sheetName, sheetPayload) {
   headerRow1.getCell(4).alignment = { vertical: 'middle', horizontal: 'center' };
   headerRow2.getCell(4).border = BORDER_STYLE;
 
-  // Merge E1:E2 - Effort Utilized
+  // Merge E1:E2 - Effort Utilized (%)
   sheet.mergeCells(1, 5, 2, 5);
-  headerRow1.getCell(5).value = 'Effort Utilized';
+  headerRow1.getCell(5).value = 'Effort Utilized (%)';
   headerRow1.getCell(5).font = HEADER_FONT;
   headerRow1.getCell(5).fill = HEADER_FILL;
   headerRow1.getCell(5).border = BORDER_STYLE_COL_E;
@@ -218,9 +252,9 @@ function generateSheet(workbook, sheetName, sheetPayload) {
       labelCell.alignment = { indent: 2 }; // Indent for user rows
     }
 
-    // Column B: Allocated Hours (plannedTotal)
+    // Column B: Allocated (To Date)
     const allocTotalCell = excelRow.getCell(2);
-    allocTotalCell.value = rowData.plannedTotal;
+    allocTotalCell.value = rowData.allocated_effort_to_date;
     allocTotalCell.numFmt = '#,##0.00';
     allocTotalCell.border = BORDER_STYLE;
     allocTotalCell.alignment = { horizontal: 'center' };
@@ -229,9 +263,9 @@ function generateSheet(workbook, sheetName, sheetPayload) {
       allocTotalCell.fill = ROLE_FILL;
     }
 
-    // Column C: Actual Hours (actualTotal)
+    // Column C: Actual (To Date)
     const actualTotalCell = excelRow.getCell(3);
-    actualTotalCell.value = rowData.actualTotal;
+    actualTotalCell.value = rowData.actual_effort_to_date;
     actualTotalCell.numFmt = '#,##0.00';
     actualTotalCell.border = BORDER_STYLE;
     actualTotalCell.alignment = { horizontal: 'center' };
@@ -302,8 +336,8 @@ function generateSheet(workbook, sheetName, sheetPayload) {
   const grandTotalMonths = {};
 
   rows.filter(r => r.level === 'role').forEach((roleRow) => {
-    grandTotalAllocated += roleRow.plannedTotal || 0;
-    grandTotalActual += roleRow.actualTotal || 0;
+    grandTotalAllocated += roleRow.allocated_effort_to_date || 0;
+    grandTotalActual += roleRow.actual_effort_to_date || 0;
     
     // Sum monthly data
     months.forEach((month) => {
@@ -483,6 +517,9 @@ app.post('/api/generate-excel', async (req, res) => {
       });
     }
 
+    // Validate required to-date effort fields
+    validatePayloadFields(payload);
+
     const workbook = await generateExcel(payload);
 
     // Generate filename with timestamp
@@ -549,8 +586,8 @@ function processPayloadForPDF(payload) {
     const monthlyTotals = {};
 
     rows.filter(r => r.level === 'role').forEach((roleRow) => {
-      grandTotalAllocated += roleRow.plannedTotal || 0;
-      grandTotalActual += roleRow.actualTotal || 0;
+      grandTotalAllocated += roleRow.allocated_effort_to_date || 0;
+      grandTotalActual += roleRow.actual_effort_to_date || 0;
 
       months.forEach((month) => {
         const monthData = roleRow.months?.[month.key] || { planned: 0, actual: 0 };
@@ -570,9 +607,9 @@ function processPayloadForPDF(payload) {
     // Process rows for table
     const processedRows = rows.map(row => ({
       label: row.label,
-      plannedTotal: row.plannedTotal || 0,
-      actualTotal: row.actualTotal || 0,
-      variance: (row.plannedTotal || 0) - (row.actualTotal || 0),
+      allocatedToDate: row.allocated_effort_to_date || 0,
+      actualToDate: row.actual_effort_to_date || 0,
+      variance: (row.allocated_effort_to_date || 0) - (row.actual_effort_to_date || 0),
       effortPct: row.effortPct || 0,
       isRole: row.level === 'role'
     }));
@@ -764,8 +801,8 @@ function buildGaugeSVG(actualHours, plannedHours) {
  */
 function buildBarChartSVG(chartData) {
   const width = 700;
-  const height = 280;
-  const marginTop = 40;
+  const height = 300;
+  const marginTop = 60;
   const marginRight = 30;
   const marginBottom = 60;
   const marginLeft = 60;
@@ -841,7 +878,13 @@ function buildBarChartSVG(chartData) {
   return `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
   <!-- Title -->
-  <text x="${width/2}" y="20" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#333">Hours Planned vs Consumed by Period</text>
+  <text x="${width/2}" y="18" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#333">Allocated vs Actual Effort (To Date by Month)</text>
+  
+  <!-- Legend (under title) -->
+  <rect x="${width/2 - 90}" y="26" width="14" height="14" fill="${allocatedColor}" />
+  <text x="${width/2 - 72}" y="37" font-family="Arial, sans-serif" font-size="11" fill="#333">Allocated</text>
+  <rect x="${width/2 + 10}" y="26" width="14" height="14" fill="${actualColor}" />
+  <text x="${width/2 + 28}" y="37" font-family="Arial, sans-serif" font-size="11" fill="#333">Actual</text>
   
   <!-- Y axis -->
   <line x1="${marginLeft}" y1="${marginTop}" x2="${marginLeft}" y2="${marginTop + chartHeight}" stroke="#333" stroke-width="1" />
@@ -850,16 +893,10 @@ function buildBarChartSVG(chartData) {
   
   <!-- X axis -->
   <line x1="${marginLeft}" y1="${marginTop + chartHeight}" x2="${marginLeft + chartWidth}" y2="${marginTop + chartHeight}" stroke="#333" stroke-width="1" />
-  <text x="${marginLeft + chartWidth/2}" y="${height - 10}" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#333">Allocated/Actual Utilization</text>
+  <text x="${marginLeft + chartWidth/2}" y="${height - 10}" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#333">Month</text>
   
   <!-- Bars -->
   ${barsHtml}
-  
-  <!-- Legend -->
-  <rect x="${width - 180}" y="8" width="14" height="14" fill="${allocatedColor}" />
-  <text x="${width - 162}" y="19" font-family="Arial, sans-serif" font-size="11" fill="#333">Allocated</text>
-  <rect x="${width - 90}" y="8" width="14" height="14" fill="${actualColor}" />
-  <text x="${width - 72}" y="19" font-family="Arial, sans-serif" font-size="11" fill="#333">Actual</text>
 </svg>`.trim();
 }
 
@@ -870,8 +907,8 @@ function buildBarChartSVG(chartData) {
  */
 function buildProjectsBarChartSVG(projectsData) {
   const width = 700;
-  const height = 300;
-  const marginTop = 40;
+  const height = 320;
+  const marginTop = 60;
   const marginRight = 30;
   const marginBottom = 80;
   const marginLeft = 60;
@@ -947,7 +984,13 @@ function buildProjectsBarChartSVG(projectsData) {
   return `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
   <!-- Title -->
-  <text x="${width/2}" y="20" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#333">Allocated vs Actual Hours by Project</text>
+  <text x="${width/2}" y="18" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#333">Allocated vs Actual Effort (To Date by Project)</text>
+  
+  <!-- Legend (under title) -->
+  <rect x="${width/2 - 140}" y="28" width="14" height="14" fill="${usedColor}" stroke="#3d6423" stroke-width="1" />
+  <text x="${width/2 - 122}" y="39" font-family="Arial, sans-serif" font-size="10" fill="#333">Used (Actual To Date)</text>
+  <rect x="${width/2 + 20}" y="28" width="14" height="14" fill="${unusedColor}" stroke="#ccc" stroke-width="1" />
+  <text x="${width/2 + 38}" y="39" font-family="Arial, sans-serif" font-size="10" fill="#333">Remaining (Allocated − Actual)</text>
   
   <!-- Y axis -->
   <line x1="${marginLeft}" y1="${marginTop}" x2="${marginLeft}" y2="${marginTop + chartHeight}" stroke="#333" stroke-width="1" />
@@ -959,12 +1002,6 @@ function buildProjectsBarChartSVG(projectsData) {
   
   <!-- Bars -->
   ${barsHtml}
-  
-  <!-- Legend -->
-  <rect x="${width - 220}" y="8" width="14" height="14" fill="${usedColor}" stroke="#3d6423" stroke-width="1" />
-  <text x="${width - 202}" y="19" font-family="Arial, sans-serif" font-size="10" fill="#333">Used (Actual)</text>
-  <rect x="${width - 110}" y="8" width="14" height="14" fill="${unusedColor}" stroke="#ccc" stroke-width="1" />
-  <text x="${width - 92}" y="19" font-family="Arial, sans-serif" font-size="10" fill="#333">Unused</text>
 </svg>`.trim();
 }
 
@@ -997,15 +1034,21 @@ function renderPDFHtml(data, options = {}) {
     let lines = [];
 
     if (contextBlock.type === 'summary') {
-      // Summary context block
+      // Summary context block - emphasize "to date" in description
       if (contextBlock.description) {
-        lines.push(contextBlock.description);
+        // Ensure description reflects to-date logic
+        let desc = contextBlock.description;
+        if (!desc.toLowerCase().includes('to date')) {
+          desc = desc.replace(/aggregates resource allocation and actual effort/i, 
+            'aggregates resource allocation and actual effort <strong>to date</strong>');
+        }
+        lines.push(`<strong>${desc}</strong>`);
       }
       if (contextBlock.portfolioSpan) {
-        lines.push(`<strong>Portfolio date span:</strong> ${contextBlock.portfolioSpan.start} → ${contextBlock.portfolioSpan.end}`);
+        lines.push(`Portfolio date span: ${contextBlock.portfolioSpan.start} → ${contextBlock.portfolioSpan.end}`);
       }
       if (contextBlock.reportingPeriod) {
-        lines.push(`<strong>Reporting period:</strong> ${contextBlock.reportingPeriod.start} → ${contextBlock.reportingPeriod.end}`);
+        lines.push(`<span style="background: #e8f5e9; display: inline; border-radius: 3px;"><strong>Reporting period (used for all calculations):</strong> ${contextBlock.reportingPeriod.start} → ${contextBlock.reportingPeriod.end}</span>`);
       }
     } else if (contextBlock.type === 'project') {
       // Project context block
@@ -1013,27 +1056,27 @@ function renderPDFHtml(data, options = {}) {
         lines.push(contextBlock.description);
       }
       if (contextBlock.projectSpan) {
-        lines.push(`<strong>Project date span:</strong> ${contextBlock.projectSpan.start} → ${contextBlock.projectSpan.end}`);
+        lines.push(`Project date span: ${contextBlock.projectSpan.start} → ${contextBlock.projectSpan.end}`);
       }
       if (contextBlock.reportingPeriod) {
-        lines.push(`<strong>Reporting period:</strong> ${contextBlock.reportingPeriod.start} → ${contextBlock.reportingPeriod.end}`);
+        lines.push(`<span style="background: #e8f5e9; display: inline; border-radius: 3px;"><strong>Reporting period (used for all calculations):</strong> ${contextBlock.reportingPeriod.start} → ${contextBlock.reportingPeriod.end}</span>`);
       }
     }
 
     // Add metric definitions
     if (contextBlock.metricDefinitions) {
       const defs = contextBlock.metricDefinitions;
-      if (defs.allocated_hours_total) {
-        lines.push(`<strong>Allocated Hours (Total):</strong> ${defs.allocated_hours_total.replace(/^Allocated Hours \(Total\) is the /, '').replace(/^Allocated Hours \(Total\) is /, '')}`);
+      if (defs.allocated_effort_to_date) {
+        lines.push(`<strong>Allocated Effort (To Date):</strong> ${defs.allocated_effort_to_date.replace(/^Allocated Effort \(To Date\) is the /, '').replace(/^Allocated Effort \(To Date\) is /, '')}`);
       }
-      if (defs.actual_hours_period) {
-        lines.push(`<strong>Actual Hours (Period):</strong> ${defs.actual_hours_period.replace(/^Actual Hours \(Period\) is the /, '').replace(/^Actual Hours \(Period\) is /, '')}`);
+      if (defs.actual_effort_to_date) {
+        lines.push(`<strong>Actual Effort (To Date):</strong> ${defs.actual_effort_to_date.replace(/^Actual Effort \(To Date\) is the /, '').replace(/^Actual Effort \(To Date\) is /, '')}`);
       }
       if (defs.variance_hours) {
         lines.push(`<strong>Variance:</strong> ${defs.variance_hours.replace(/^Variance \(Hours\) = /, '')}`);
       }
       if (defs.effort_utilized_pct) {
-        lines.push(`<strong>Effort Utilized:</strong> ${defs.effort_utilized_pct.replace(/^Effort Utilized % = /, '')}`);
+        lines.push(`<strong>Effort Utilized (%):</strong> ${defs.effort_utilized_pct.replace(/^Effort Utilized % = /, '')}`);
       }
     }
 
@@ -1055,7 +1098,7 @@ function renderPDFHtml(data, options = {}) {
       const isUser = !row.isRole;
       
       // For simple PDF, hide Allocated, Variance, Effort for user rows
-      const allocatedValue = (hideUserAllocatedData && isUser) ? '' : formatNum(row.plannedTotal);
+      const allocatedValue = (hideUserAllocatedData && isUser) ? '' : formatNum(row.allocatedToDate);
       const varianceValue = (hideUserAllocatedData && isUser) ? '' : formatNum(row.variance);
       const effortValue = (hideUserAllocatedData && isUser) ? '' : formatPct(row.effortPct);
       
@@ -1063,7 +1106,7 @@ function renderPDFHtml(data, options = {}) {
         <tr class="${rowClass}">
           <td>${row.label}</td>
           <td>${allocatedValue}</td>
-          <td>${formatNum(row.actualTotal)}</td>
+          <td>${formatNum(row.actualToDate)}</td>
           <td>${varianceValue}</td>
           <td>${effortValue}</td>
         </tr>`;
@@ -1092,22 +1135,26 @@ function renderPDFHtml(data, options = {}) {
       ${contextBlockHtml}
       
       <!-- SVG Gauge Chart Section -->
-      <div class="gauge-wrapper">
-        <div class="gauge-svg-container">
-          ${gaugeSvg}
-        </div>
-        <div class="kpi-block">
-          <div class="kpi-item">
-            <div class="kpi-label">Actual Hours<br/>Consumed</div>
-            <div class="kpi-value">${formatNum(gaugeActual)}</div>
+      <div class="gauge-section">
+        <div class="gauge-title">Effort Utilized (%) (To Date)</div>
+        <div class="gauge-subtitle">Based on allocated and actual effort within the reporting period</div>
+        <div class="gauge-wrapper">
+          <div class="gauge-svg-container">
+            ${gaugeSvg}
           </div>
-          <div class="kpi-item">
-            <div class="kpi-label">Planned Hours<br/>Allocated</div>
-            <div class="kpi-value">${formatNum(gaugeAllocated)}</div>
-          </div>
-          <div class="kpi-item">
-            <div class="kpi-label">Percent Hours<br/>Consumed</div>
-            <div class="kpi-value">${gaugePercent.toFixed(1)}%</div>
+          <div class="kpi-block">
+            <div class="kpi-item">
+              <div class="kpi-label">Actual Effort<br/>(To Date)</div>
+              <div class="kpi-value">${formatNum(gaugeActual)}</div>
+            </div>
+            <div class="kpi-item">
+              <div class="kpi-label">Allocated Effort<br/>(To Date)</div>
+              <div class="kpi-value">${formatNum(gaugeAllocated)}</div>
+            </div>
+            <div class="kpi-item">
+              <div class="kpi-label">Effort Utilized<br/>(%)</div>
+              <div class="kpi-value">${gaugePercent.toFixed(1)}%</div>
+            </div>
           </div>
         </div>
       </div>
@@ -1123,9 +1170,9 @@ function renderPDFHtml(data, options = {}) {
         <thead>
           <tr>
             <th style="width: 50%">Project Name</th>
-            <th style="width: 17%">Allocated Hours</th>
-            <th style="width: 17%">Actual Hours</th>
-            <th style="width: 16%">Utilization</th>
+            <th style="width: 17%">Allocated (To Date)</th>
+            <th style="width: 17%">Actual (To Date)</th>
+            <th style="width: 16%">Effort Utilized (%)</th>
           </tr>
         </thead>
         <tbody>
@@ -1148,16 +1195,16 @@ function renderPDFHtml(data, options = {}) {
         <thead>
           <tr>
             <th style="width: 35%">Role / User</th>
-            <th style="width: 16%">Allocated Hours</th>
-            <th style="width: 16%">Actual Hours</th>
+            <th style="width: 16%">Allocated (To Date)</th>
+            <th style="width: 16%">Actual (To Date)</th>
             <th style="width: 16%">Variance</th>
-            <th style="width: 17%">Effort Utilized</th>
+            <th style="width: 17%">Effort Utilized (%)</th>
           </tr>
         </thead>
         <tbody>
           ${rowsHtml}
           <tr class="grand-total">
-            <td>GRAND TOTAL</td>
+            <td>GRAND TOTAL (To Date)</td>
             <td>${formatNum(sheet.grandTotal.allocated)}</td>
             <td>${formatNum(sheet.grandTotal.actual)}</td>
             <td>${formatNum(sheet.grandTotal.variance)}</td>
@@ -1194,7 +1241,10 @@ function renderPDFHtml(data, options = {}) {
     .context-line { margin-bottom: 3px; }
     .context-line:last-child { margin-bottom: 0; }
     .context-line strong { color: #333; }
-    .gauge-wrapper { display: flex; align-items: center; justify-content: center; gap: 30px; margin-bottom: 20px; width: 70%; margin-left: auto; margin-right: auto; padding: 20px 30px; }
+    .gauge-section { margin-bottom: 20px; }
+    .gauge-title { text-align: center; font-size: 14px; font-weight: 700; color: #333; margin-bottom: 4px; }
+    .gauge-subtitle { text-align: center; font-size: 10px; color: #666; margin-bottom: 10px; }
+    .gauge-wrapper { display: flex; align-items: center; justify-content: center; gap: 30px; width: 70%; margin-left: auto; margin-right: auto; padding: 10px 30px; }
     .gauge-svg-container { flex: 1 1 auto; max-width: 320px; }
     .gauge-svg-container svg { width: 100%; height: auto; }
     .kpi-block { width: 180px; text-align: right; }
@@ -1239,7 +1289,7 @@ function renderPDFHtml(data, options = {}) {
   ${sheetsHtml}
 
   <div class="footer">
-    Resource Management Workbench Report • Confidential
+    Resource Management Workbench Report • Confidential • All metrics calculated using daily allocation data within the reporting period
   </div>
 </body>
 </html>`;
@@ -1301,6 +1351,9 @@ app.post('/api/generate-pdf-extended', async (req, res) => {
       });
     }
 
+    // Validate required to-date effort fields
+    validatePayloadFields(payload);
+
     const pdfBuffer = await generatePDF(payload);
 
     // Generate filename with timestamp
@@ -1334,6 +1387,9 @@ app.post('/api/generate-pdf', async (req, res) => {
         error: 'Invalid payload. Required: either (meta.months + rows) for single sheet, or (sheets[]) for multi-tab format'
       });
     }
+
+    // Validate required to-date effort fields
+    validatePayloadFields(payload);
 
     // Pass option to hide user-level data
     const pdfBuffer = await generatePDF(payload, { hideUserAllocatedData: true });
