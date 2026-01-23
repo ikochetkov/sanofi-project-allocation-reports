@@ -3,7 +3,26 @@ const ExcelJS = require('exceljs');
 const puppeteer = require('puppeteer');
 
 const app = express();
-app.use(express.json({ 
+
+// API Key for authentication (set via environment variable)
+const API_KEY = process.env.API_KEY || 'dev-key-change-me';
+
+// API Key authentication middleware
+function requireApiKey(req, res, next) {
+  const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+
+  if (!apiKey) {
+    return res.status(401).json({ error: 'Missing API key. Provide via X-API-Key header.' });
+  }
+
+  if (apiKey !== API_KEY) {
+    return res.status(403).json({ error: 'Invalid API key.' });
+  }
+
+  next();
+}
+
+app.use(express.json({
   limit: '10mb',
   verify: (req, res, buf) => {
     req.rawBody = buf.toString();
@@ -503,7 +522,7 @@ async function generateExcel(payload) {
 }
 
 // ============ API ENDPOINT ============
-app.post('/api/generate-excel', async (req, res) => {
+app.post('/api/generate-excel', requireApiKey, async (req, res) => {
   try {
     const payload = req.body;
 
@@ -1337,7 +1356,7 @@ async function generatePDF(payload, options = {}) {
 }
 
 // PDF Generation Endpoint (Extended - shows all data)
-app.post('/api/generate-pdf-extended', async (req, res) => {
+app.post('/api/generate-pdf-extended', requireApiKey, async (req, res) => {
   try {
     const payload = req.body;
 
@@ -1374,7 +1393,7 @@ app.post('/api/generate-pdf-extended', async (req, res) => {
 });
 
 // PDF Generation Endpoint (Simple - hides user-level Allocated, Variance, Effort columns)
-app.post('/api/generate-pdf', async (req, res) => {
+app.post('/api/generate-pdf', requireApiKey, async (req, res) => {
   try {
     const payload = req.body;
 
@@ -1489,8 +1508,9 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Resource Allocation API running at http://localhost:${PORT}`);
+  console.log(`🔐 API Key auth enabled (set API_KEY env var, current: ${API_KEY === 'dev-key-change-me' ? 'using default dev key' : 'custom key set'})`);
   console.log(`📋 POST /api/generate-excel - Generate Excel from JSON payload`);
   console.log(`📄 POST /api/generate-pdf - Generate PDF report (simplified: user allocation data hidden)`);
   console.log(`📄 POST /api/generate-pdf-extended - Generate PDF report (full data for all rows)`);
-  console.log(`💊 GET /health - Health check`);
+  console.log(`💊 GET /health - Health check (no auth required)`);
 });
