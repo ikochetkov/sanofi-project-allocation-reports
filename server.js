@@ -1249,10 +1249,9 @@ function renderPDFHtml(data, options = {}) {
     .header .subtitle { font-size: 12px; color: #666; margin-bottom: 50px; }
     .toc { width: 100%; max-width: 500px; text-align: left; margin-top: 20px; }
     .toc-title { font-size: 16px; font-weight: 700; color: #333; margin-bottom: 15px; padding-bottom: 8px; border-bottom: 2px solid #4F7F2D; }
-    .toc-item { display: flex; justify-content: space-between; align-items: baseline; padding: 8px 0; border-bottom: 1px dotted #ccc; font-size: 11px; }
+    .toc-item { padding: 8px 0; border-bottom: 1px dotted #ccc; font-size: 11px; }
     .toc-item:last-child { border-bottom: none; }
-    .toc-name { color: #333; flex: 1; padding-right: 10px; }
-    .toc-page { color: #666; font-weight: 600; white-space: nowrap; }
+    .toc-name { color: #333; }
     .sheet-section { margin-bottom: 20px; }
     .sheet-section:not(:first-of-type) { page-break-before: always; }
     .sheet-title { font-size: 14px; font-weight: bold; color: #333; margin-bottom: 10px; padding: 8px; background: #f5f5f5; border-left: 4px solid #333; }
@@ -1300,7 +1299,6 @@ function renderPDFHtml(data, options = {}) {
       ${data.sheets.map((sheet, idx) => `
       <div class="toc-item">
         <span class="toc-name">${sheet.sheetName}</span>
-        <span class="toc-page">Page ${idx + 2}</span>
       </div>`).join('')}
     </div>
   </div>
