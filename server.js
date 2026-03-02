@@ -7,6 +7,10 @@ const app = express();
 // API Key for authentication (set via environment variable)
 const API_KEY = process.env.API_KEY || 'dev-key-change-me';
 
+// Chart display filter: only show bar chart data from this month onwards
+// KPI totals (gauge, table) still reflect the full reporting period
+const CHART_DISPLAY_START_MONTH = '2026-01';
+
 // Mobiz Brand Colors
 const MOBIZ_COLORS = {
   primary: '#D8242A',      // Red accent - headings, borders, accents
@@ -628,6 +632,11 @@ function processPayloadForPDF(payload) {
       });
     });
 
+    // Filter months for chart display only (totals remain based on full months array)
+    const chartMonths = CHART_DISPLAY_START_MONTH
+      ? months.filter(m => m.key >= CHART_DISPLAY_START_MONTH)
+      : months;
+
     const grandTotalVariance = grandTotalAllocated - grandTotalActual;
     const grandTotalEffortPct = grandTotalAllocated > 0 
       ? (grandTotalActual / grandTotalAllocated) * 100 
@@ -657,7 +666,8 @@ function processPayloadForPDF(payload) {
           portfolioSpan: context.date_context?.portfolio_span || null,
           reportingPeriod: context.date_context?.reporting_period || null,
           metricDefinitions: context.metric_definitions || null,
-          notes: context.notes || []
+          notes: context.notes || [],
+          chartDisplayStartMonth: CHART_DISPLAY_START_MONTH || null
         };
       } else if (context.type === 'project') {
         // Project page context
@@ -667,7 +677,8 @@ function processPayloadForPDF(payload) {
           description: context.description || '',
           projectSpan: context.date_context?.project_span || null,
           reportingPeriod: context.date_context?.reporting_period || null,
-          metricDefinitions: context.metric_definitions || null
+          metricDefinitions: context.metric_definitions || null,
+          chartDisplayStartMonth: CHART_DISPLAY_START_MONTH || null
         };
       }
     }
@@ -687,10 +698,10 @@ function processPayloadForPDF(payload) {
       }
     });
 
-    // Chart data for this sheet
-    const chartLabels = months.map(m => m.label);
-    const chartAllocated = months.map(m => monthlyTotals[m.key]?.planned || 0);
-    const chartActual = months.map(m => monthlyTotals[m.key]?.actual || 0);
+    // Chart data for this sheet (uses filtered chartMonths)
+    const chartLabels = chartMonths.map(m => m.label);
+    const chartAllocated = chartMonths.map(m => monthlyTotals[m.key]?.planned || 0);
+    const chartActual = chartMonths.map(m => monthlyTotals[m.key]?.actual || 0);
 
     chartsData.push({
       labels: chartLabels,
@@ -1090,6 +1101,14 @@ function renderPDFHtml(data, options = {}) {
       if (contextBlock.reportingPeriod) {
         lines.push(`<span style="background: #e8f5e9; display: inline; border-radius: 3px;"><strong>Reporting period (used for all calculations):</strong> ${contextBlock.reportingPeriod.start} → ${contextBlock.reportingPeriod.end}</span>`);
       }
+    }
+
+    // Add chart display filter annotation
+    if (contextBlock.chartDisplayStartMonth) {
+      const [year, month] = contextBlock.chartDisplayStartMonth.split('-');
+      const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const displayDate = `${monthNames[parseInt(month, 10) - 1]} ${year}`;
+      lines.push(`<span style="background: #fff3e0; display: inline; border-radius: 3px;"><strong>Chart display:</strong> ${displayDate} onwards (KPI totals reflect full reporting period)</span>`);
     }
 
     // Add metric definitions
